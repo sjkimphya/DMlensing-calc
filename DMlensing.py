@@ -2,6 +2,8 @@ import numpy as np
 from numpy import sqrt, sin, cos, arcsin, arccos, arctan, abs, inner, cross, log10, exp, log
 from scipy.special import loggamma
 from mpmath import hyp1f1
+import mpmath as mp
+mp.mp.dps=30
 
 import random
 
@@ -9,6 +11,9 @@ import ray
 from os import cpu_count
 cpu_num = cpu_count()   #number of processor
 # ray.init(num_cpus=12, ignore_reinit_error=True)
+
+import matplotlib.pyplot as plt
+from scipy.stats import chi2, norm
 
 #Constants
 pi = np.pi
@@ -122,7 +127,13 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
     ex1 =  np.tensordot(omegas, t_data, axes=0) - m*np.tensordot(v_vecs, x_data.T, axes=1) + rnd_phase  # (k_num*dat_num) array
 
     basis_comp_nums = cos(ex1) * sqrt(2/k_num)
-    
+    # print("v_vecs")
+    # print(v_vecs)
+    # print("omegas")
+    # print(omegas)
+    # print("random")
+    # print(rnd_phase)
+
     if NO_LENSING:
         ob_data_no_lens = np.sum(basis_comp_nums, axis=0)
 
@@ -314,7 +325,8 @@ def _Cov_mat_process(set_num, t_data, x_data, v_ob_vec, m, sig_v):
 
     return (_i, result)
 
-
+def Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v): # <SS'>
+    return _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v)
 
 def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v): # <SS'>
         
@@ -326,10 +338,15 @@ def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v): # <SS'>
     
     xi = m * sig_v**2 * dt
     zeta = 1 - 1j*xi
+    chi_vec = (v_ob_vec - 1j * m * sig_v**2 * dx_vec)
+    chi2 = (chi_vec.T @ chi_vec)
 
     Const = 1  #g_eff**2 * rho / m**2        #### temp value ####
+    # ex = (
+    #     1j * (+m*dt + m/(2*zeta) * (v_ob2*dt - 2*np.inner(v_ob_vec, dx_vec) + 1j*m*sig_v**2*dx2) )
+    # )
     ex = (
-        1j * (-m*dt + m/(2*zeta) * (v_ob2*dt - 2*np.inner(v_ob_vec, dx_vec) + 1j*m*sig_v**2*dx2) )
+        (chi2 - zeta*v_ob2) / (2 * sig_v**2 * zeta) +1j*m*dt
     )
     comp = exp(ex) * zeta**-1.5
     
@@ -341,6 +358,7 @@ def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v): # <SS'>
 
 
 if __name__=="__main__":
-    ray.init(num_cpus=8, ignore_reinit_error=True)
+    # ray.init(num_cpus=8, ignore_reinit_error=True)
 
-    ray.shutdown()
+    # ray.shutdown()
+    print(mp.mp)
