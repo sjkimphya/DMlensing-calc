@@ -3,7 +3,11 @@ from numpy import sqrt, sin, cos, arcsin, arccos, arctan, abs, inner, cross, log
 from scipy.special import loggamma
 from mpmath import hyp1f1
 import mpmath as mp
-mp.mp.dps=30
+mp.mp.dps=40
+mp.mp.pretty=True
+
+mp2 = mp.mp.clone()
+mp2.dps = 12
 
 import random
 
@@ -41,20 +45,32 @@ Error_here = False
 Error_code = 1234567
 
 
-def amp_temp(v_vec, m ):    # m, v : natural unit
+@ray.remote
+def ray_Amp_Sun(x_idx, v_vecs, r_vecs, m=1e-13*eV/hbar ):
+    v_tot_num = len(v_vecs)
+    result_dic = {}
+    for v_idx in range(v_tot_num):
+        v_vec = v_vecs[v_idx]
+        r_vec = r_vecs[x_idx]
+        result_dic[v_idx] = Amp_Sun(v_vec, r_vec, m)
+    return (result_dic, x_idx)
+
+def Amp_Sun(v_vec, r_vec, m=1e-13*eV/hbar ):    # m, v : natural unit
+    
     r_vec = np.array( [0,0,1] ) * AU/c
     r = np.linalg.norm(r_vec)
     v = np.linalg.norm(v_vec)
 
-    M = m / hbar
+    M = m
     B = M_sN*M / v
     Y = M * (v*r - np.inner(v_vec, r_vec))
 
-    hyp0 = hyp1f1( 1j*B , 1 , 1j*Y )
+    hyp0 = mp2.hyp1f1( 1j*B , 1 , 1j*Y )
     hyp0 = float(hyp0.real) + 1j*float(hyp0.imag)
 
     amp = exp(pi*B/2 + loggamma(1-1j*B)) * hyp0
     return amp
+
 
 
 class DMobData():
@@ -64,7 +80,7 @@ class DMobData():
         self.ob = None
         self.ob_num = None
 
-    def AddData(self, t_data, x_vec_data, ob_data, ob_num):
+    def AddData(self, t_data, x_vec_data, ob_data, ob_num, ob_lensed_data=None):
         data_num = len(t_data)
 
         if self.ob_num is None:
@@ -72,11 +88,15 @@ class DMobData():
             self.x_vec = x_vec_data
             self.ob = ob_data
             self.ob_num = np.repeat(ob_num, data_num)
+            if ob_lensed_data is not None:
+                self.ob_lensed = ob_lensed_data
         else:
             self.t = np.concatenate((self.t, t_data), axis=0)
             self.x_vec = np.concatenate((self.x_vec, x_vec_data), axis=0)
             self.ob = np.concatenate((self.ob, ob_data), axis=0)
             self.ob_num = np.concatenate((self.ob_num, np.repeat(ob_num, data_num)), axis=0)
+            if ob_lensed_data is not None:
+                self.ob_lensed = np.concatenate((self.ob_lensed, ob_lensed_data), axis=0)
 
 
 # class DMobData():
@@ -126,29 +146,52 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
     omegas = sqrt(np.linalg.norm(v_vecs, axis=1)**2 + 1) * m
     ex1 =  np.tensordot(omegas, t_data, axes=0) - m*np.tensordot(v_vecs, x_data.T, axes=1) + rnd_phase  # (k_num*dat_num) array
 
-    basis_comp_nums = cos(ex1) * sqrt(2/k_num)
-    # print("v_vecs")
-    # print(v_vecs)
-    # print("omegas")
-    # print(omegas)
-    # print("random")
-    # print(rnd_phase)
+    basis_comp_nums = np.exp(1j*ex1) * sqrt(2/k_num)
 
     if NO_LENSING:
-        ob_data_no_lens = np.sum(basis_comp_nums, axis=0)
+        ob_data_no_lens = np.sum(basis_comp_nums.real, axis=0)
 
     if INCLUDE_LENSING:
-        pass
+        t_num = len(t_data)
+        amps = np.zeros((k_num, t_num), dtype=complex)
+
+        # not use ray
+        # for v_idx in range(k_num):
+        #     for x_idx in range(t_num):  
+        #         amps[v_idx, x_idx] = Amp_Sun(v_vecs[v_idx], x_data[x_idx])
+
+        # use ray
+        v_ref = ray.put(v_vecs)
+        x_ref = ray.put(x_data)
+
+        result_refs = []
+        for x_idx in range(t_num):
+            result_refs.append(ray_Amp_Sun.remote(x_idx, v_ref, x_ref, m))
+
+        while result_refs:
+            done, result_refs = ray.wait(result_refs)
+            result_pack = ray.get(done[0])
+            amp_result = result_pack[0]
+            x_idx = result_pack[1]
+            
+            for v_idx in range(k_num):
+                amps[v_idx, x_idx] = amp_result[v_idx]
+        #
+
+        lensed_comp_nums = basis_comp_nums * amps
+        ob_lensed_data = np.sum(lensed_comp_nums.real, axis=0)
+    else:
+        ob_lensed_data = None
 
     result = DMobData()
-    result.AddData(t_data=t_data, x_vec_data=x_data, ob_data=ob_data_no_lens, ob_num=ob_num)
+    result.AddData(t_data=t_data, x_vec_data=x_data, ob_data=ob_data_no_lens, ob_lensed_data = ob_lensed_data, ob_num=ob_num)
 
     return result
 
 
 
 class stochasticDM():
-    def __init__(self, data=None):   # data: DMobData form, seed: integer
+    def __init__(self, data=None, mpmath=True):   # data: DMobData form, seed: integer
         
         # # Random generator
         # self.seed = seed
@@ -166,10 +209,11 @@ class stochasticDM():
             self.data = data
 
         # Covariance matrix
-        self.cov_mat = self.Cov_matrix()
+        self.cov_mat = self.Cov_matrix(mpmath)
+        self.inv_cov_mat = self.cov_mat**-1
 
     
-    def Log_likelihood(self):  # data_vec: axion field value data vector ; # Cov_mat: covariance matrix, should be numpy array
+    def Log_likelihood(self, lensed=False):  # data_vec: axion field value data vector ; # Cov_mat: covariance matrix, should be numpy array
         
         ob_data_vec = self.data.ob
         cov_mat = self.cov_mat
@@ -183,10 +227,14 @@ class stochasticDM():
         # dat_num  = len(ob_data_vec)
         # det_cov  = np.linalg.det(cov_mat)
         # if det_cov==0: raise Exception("det_cov is zero.")
+        if lensed:
+            data_mat = mp.matrix(self.data.ob_lensed)
+        else:
+            data_mat = mp.matrix(ob_data_vec)     # Make data_vec in a colume vector (matrix)
 
-        data_mat = np.reshape(ob_data_vec, (-1,1))     # Make data_vec in a colume vector (matrix)
-        
-        exponent = -0.5 * ( data_mat.T @ np.linalg.inv(cov_mat) @ data_mat).item()
+        inv_mat = self.inv_cov_mat
+
+        exponent = -0.5 * ( data_mat.T * inv_mat * data_mat)[0]
         
         # _likelihood = ((2*pi)**dat_num * det_cov)**-0.5
         # _likelihood = _likelihood * exp(exponent)
@@ -195,42 +243,42 @@ class stochasticDM():
         # print(Log_like)
         return -2*exponent#Log_like
     
-    def Cor_func(self, dt, dx_vec, v_ob_vec): # <SS'>
+    # def Cor_func(self, dt, dx_vec, v_ob_vec): # <SS'>
         
-        g_eff = self.g_eff
-        rho   = self.rho_a
-        m     = self.m_a
-        sig_v = self.sig_v
-        # v_ob_vec       (numpy, 3d vector)
-        # dt
-        # dx_vec (numpy, 3d vector)
-        dx2 = np.linalg.norm(dx_vec)**2
-        v_ob2 = np.linalg.norm(v_ob_vec)**2
+    #     g_eff = self.g_eff
+    #     rho   = self.rho_a
+    #     m     = self.m_a
+    #     sig_v = self.sig_v
+    #     # v_ob_vec       (numpy, 3d vector)
+    #     # dt
+    #     # dx_vec (numpy, 3d vector)
+    #     dx2 = np.linalg.norm(dx_vec)**2
+    #     v_ob2 = np.linalg.norm(v_ob_vec)**2
         
-        # delta = -.5 * m * dx2/dt
-        xi = m * sig_v**2 * dt
-        zeta = 1 - 1j*xi
+    #     # delta = -.5 * m * dx2/dt
+    #     xi = m * sig_v**2 * dt
+    #     zeta = 1 - 1j*xi
 
-        Const = 1  #g_eff**2 * rho / m**2        #### temp value ####
+    #     Const = 1  #g_eff**2 * rho / m**2        #### temp value ####
 
-        # if dt==0:
-        #     return Const * exp(-.5* m**2 * sig_v**2 * dx2) * cos(m*np.inner(v_ob_vec, dx_vec))
-        # v1_vec = v_ob_vec - (dx_vec / dt)
+    #     # if dt==0:
+    #     #     return Const * exp(-.5* m**2 * sig_v**2 * dx2) * cos(m*np.inner(v_ob_vec, dx_vec))
+    #     # v1_vec = v_ob_vec - (dx_vec / dt)
         
-        # ex1  = -1j * m * dt * (1 + .5 * (dx2/dt**2))
-        # ex2  = np.inner(v1_vec, v1_vec) / (2*sig_v**2) * (1/zeta - 1)
-        # ex1, ex2 each diverge when dt-->0... remove diverging term in ex
-        ex = (
-            1j * (-m*dt + m/(2*zeta) * (v_ob2*dt - 2*np.inner(v_ob_vec, dx_vec) + 1j*m*sig_v**2*dx2) )
-        )
-        comp = exp(ex) * zeta**-1.5
+    #     # ex1  = -1j * m * dt * (1 + .5 * (dx2/dt**2))
+    #     # ex2  = np.inner(v1_vec, v1_vec) / (2*sig_v**2) * (1/zeta - 1)
+    #     # ex1, ex2 each diverge when dt-->0... remove diverging term in ex
+    #     ex = (
+    #         1j * (-m*dt + m/(2*zeta) * (v_ob2*dt - 2*np.inner(v_ob_vec, dx_vec) + 1j*m*sig_v**2*dx2) )
+    #     )
+    #     comp = exp(ex) * zeta**-1.5
         
-        result = Const * comp.real
-        return result
+    #     result = Const * comp.real
+    #     return result
     
 
 
-    def Cov_matrix(self):
+    def Cov_matrix(self, mpmath=True):
         t_data = self.data.t
         x_data = self.data.x_vec
         v_ob_vec = self.v0_vec  # temporary... should be corrected
@@ -251,7 +299,7 @@ class stochasticDM():
 
         #         cov_mat[i,j] = self.Cor_func(dt, dx_vec, v_ob_vec)
 
-        cov_mat = _Cov_matrix(t_data, x_data, v_ob_vec, m, sig_v)
+        cov_mat = _Cov_matrix(t_data, x_data, v_ob_vec, m, sig_v, mpmath)
 
         # __cor_func = np.vectorize(self.__temp_cor_func)
         # cov_mat = __cor_func(range(tot_num), range(tot_num))
@@ -273,7 +321,7 @@ class stochasticDM():
 
 
 ### Multiprocessing for correlation function calculation
-def _Cov_matrix(t_data, x_data, v_ob_vec, m, sig_v):
+def _Cov_matrix(t_data, x_data, v_ob_vec, m, sig_v, mpmath=True):
     tot_num = len(t_data)
     set_num_max = (tot_num+1) // 2
     
@@ -282,17 +330,23 @@ def _Cov_matrix(t_data, x_data, v_ob_vec, m, sig_v):
 
     result_refs = []
     for i in range(set_num_max):
-        testmat = _Cov_mat_process.remote(i, t_data_ref, x_data_ref, v_ob_vec, m, sig_v)
+        testmat = _Cov_mat_process.remote(i, t_data_ref, x_data_ref, v_ob_vec, m, sig_v, mpmath)
         result_refs.append(testmat)
 
-    Cov_mat = np.zeros((tot_num , tot_num))
+    # Cov_mat = np.zeros((tot_num , tot_num))
+    if mpmath:
+        Cov_mat = mp.matrix(tot_num)
+    else:
+        Cov_mat = np.zeros((tot_num, tot_num))
 
     while result_refs:
         done, result_refs = ray.wait(result_refs)
         result = ray.get(done[0])
+        # print(ray.get(result))   ######################################3
         _i = result[0]
-        temp_arr = result[1]
-        for j, val in enumerate(temp_arr):
+        temp_dic = result[1]
+        for j in range(tot_num):
+            val = temp_dic[j]
             if j<_i:
                 Cov_mat[_i, j] = val
                 Cov_mat[j,_i] = val
@@ -301,15 +355,20 @@ def _Cov_matrix(t_data, x_data, v_ob_vec, m, sig_v):
                 Cov_mat[tot_num-1-j, tot_num-1-_i] = val
 
     for i in range(tot_num):
-        Cov_mat[i,i] = 1
+        if mpmath: Cov_mat[i,i] = mp.mpf('1')
+        else: Cov_mat[i,i] = 1
 
     return Cov_mat
 
-
 @ray.remote
-def _Cov_mat_process(set_num, t_data, x_data, v_ob_vec, m, sig_v):
+def _Cov_mat_process(set_num, t_data, x_data, v_ob_vec, m, sig_v, mpmath=True):
+    return Cov_mat_process(set_num, t_data, x_data, v_ob_vec, m, sig_v, mpmath)
+
+def Cov_mat_process(set_num, t_data, x_data, v_ob_vec, m, sig_v, mpmath=True):
     tot_num = len(t_data)
-    result = np.zeros(tot_num)
+    # result = mp.zeros(1,tot_num)
+    result = {}
+    # result = np.zeros(tot_num)
     _i = set_num
     for _j in range(tot_num):
         if _j>_i:
@@ -318,37 +377,60 @@ def _Cov_mat_process(set_num, t_data, x_data, v_ob_vec, m, sig_v):
         else:
             i = _i
             j = _j
-
-        dt = t_data[i]- t_data[j]
-        dx_vec = x_data[i] - x_data[j] 
-        result[_j] = _Cov_mat_component(dt,dx_vec, v_ob_vec, m, sig_v)
-
+        if mpmath:
+            dt = mp.mpf(t_data[i]) - mp.mpf(t_data[j])
+            dx_vec = mp.matrix(x_data[i]) - mp.matrix(x_data[j])
+        else:
+            dt = t_data[i] - t_data[j]
+            dx_vec = x_data[i] - x_data[j]
+        result[_j] = _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath)
+        # nd_result = np.array(result.tolist(),dtype=np.float64)
+        # re = mp.mpf('1')
     return (_i, result)
 
-def Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v): # <SS'>
-    return _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v)
 
-def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v): # <SS'>
+def Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True): # <SS'>
+    return _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath)
+
+def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True): # <SS'>
         
     # v_ob_vec       (numpy, 3d vector)
-    
     # dx_vec (numpy, 3d vector) ( [dx, dy, dz] )
-    dx2 = np.linalg.norm(dx_vec)**2
-    v_ob2 = np.linalg.norm(v_ob_vec)**2
-    
-    xi = m * sig_v**2 * dt
-    zeta = 1 - 1j*xi
-    chi_vec = (v_ob_vec - 1j * m * sig_v**2 * dx_vec)
-    chi2 = (chi_vec.T @ chi_vec)
+    if mpmath:
+        _v_ob_vec = mp.matrix(v_ob_vec)
+        v_ob2 = mp.norm(_v_ob_vec)**2
+        _j = mp.mpc(1j)
+
+        _m = mp.mpf(m)
+        _sig_v = mp.mpf(sig_v)
+        _dt = mp.mpf(dt)
+        _dx_vec = mp.matrix(dx_vec)
+    else:
+        _v_ob_vec = v_ob_vec
+        v_ob2 = np.linalg.norm(_v_ob_vec)**2
+        _j = 1j
+
+        _m = m
+        _sig_v = sig_v
+        _dt = dt
+        _dx_vec = dx_vec
+
+    xi = _m * _sig_v**2 * _dt
+    zeta = 1 - _j*xi
+    chi_vec = (_v_ob_vec - _j * _m * _sig_v**2 * _dx_vec)
+
+    if mpmath: chi2 = (chi_vec.T * chi_vec)[0]
+    else: chi2 = ( chi_vec.T @ chi_vec ).item()
 
     Const = 1  #g_eff**2 * rho / m**2        #### temp value ####
     # ex = (
     #     1j * (+m*dt + m/(2*zeta) * (v_ob2*dt - 2*np.inner(v_ob_vec, dx_vec) + 1j*m*sig_v**2*dx2) )
     # )
     ex = (
-        (chi2 - zeta*v_ob2) / (2 * sig_v**2 * zeta) +1j*m*dt
+        (chi2/zeta - v_ob2) / (2 * _sig_v**2) + _j * _m * _dt
     )
-    comp = exp(ex) * zeta**-1.5
+    if mpmath: comp = mp.exp(ex) * zeta**-1.5
+    else:      comp = exp(ex) * zeta**-1.5
     
     result = Const * comp.real
     return result
