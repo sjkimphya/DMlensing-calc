@@ -63,7 +63,8 @@ def ray_Amp_Sun(x_idx, v_vecs, r_vecs, m=1e-13*eV/hbar ):
     return (result_dic, x_idx)
 
 def Amp_Sun(v_vec, r_vec, m=1e-13*eV/hbar ):    # m, v : natural unit
-    
+
+
     r_vec = np.array( [0,0,1] ) * AU/c
     r = np.linalg.norm(r_vec)
     v = np.linalg.norm(v_vec)
@@ -76,6 +77,7 @@ def Amp_Sun(v_vec, r_vec, m=1e-13*eV/hbar ):    # m, v : natural unit
     hyp0 = float(hyp0.real) + 1j*float(hyp0.imag)
 
     amp = exp(pi*B/2 + loggamma(1-1j*B)) * hyp0
+    
     return amp
 
 
@@ -173,7 +175,8 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
 
         result_refs = []
         for x_idx in range(t_num):
-            result_refs.append(ray_Amp_Sun.remote(x_idx, v_ref, x_ref, m))
+            each_amp_ref = ray_Amp_Sun.remote(x_idx, v_ref, x_ref, m)
+            result_refs.append(each_amp_ref)
 
         while result_refs:
             done, result_refs = ray.wait(result_refs)
@@ -200,6 +203,7 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
 class stochasticDM():
     def __init__(self, data=None, mpmath=True):   # data: DMobData form, seed: integer
         
+        self.mpmath = mpmath
         # # Random generator
         # self.seed = seed
         # self._rng = random.Random(seed)
@@ -211,13 +215,17 @@ class stochasticDM():
         self.m_a = 1e-13 * eV / hbar
         self.v0_vec = np.array( [0,0,8e-4] )
         self.sig_v = np.linalg.norm(self.v0_vec) / sqrt(2)
+        
 
         if data is not None:
             self.data = data
 
         # Covariance matrix
-        self.cov_mat = self.Cov_matrix(mpmath)
-        self.inv_cov_mat = self.cov_mat**-1
+        self.cov_mat = self.Cov_matrix()
+        if self.mpmath:
+            self.inv_cov_mat = self.cov_mat**-1
+        else:
+            self.inv_cov_mat = np.linalg.inv(self.cov_mat)
 
     
     def Log_likelihood(self, lensed=False):  # data_vec: axion field value data vector ; # Cov_mat: covariance matrix, should be numpy array
@@ -234,21 +242,28 @@ class stochasticDM():
         # dat_num  = len(ob_data_vec)
         # det_cov  = np.linalg.det(cov_mat)
         # if det_cov==0: raise Exception("det_cov is zero.")
-        if lensed:
-            data_mat = mp.matrix(self.data.ob_lensed)
+        if self.mpmath:
+            if lensed:
+                data_mat = mp.matrix(self.data.ob_lensed)
+            else:
+                data_mat = mp.matrix(ob_data_vec)     # Make data_vec in a colume vector (matrix)
         else:
-            data_mat = mp.matrix(ob_data_vec)     # Make data_vec in a colume vector (matrix)
+            if lensed:
+                data_mat = np.array(self.data.ob_lensed)
+            else:
+                data_mat = np.array(ob_data_vec)     # Make data_vec in a colume vector (matrix)
 
         inv_mat = self.inv_cov_mat
 
-        exponent = -0.5 * ( data_mat.T * inv_mat * data_mat)[0]
+        if self.mpmath: exponent = -0.5 * ( data_mat.T * inv_mat * data_mat)[0]
+        else: exponent = -0.5 * ( data_mat.T @ inv_mat @ data_mat)
         
         # _likelihood = ((2*pi)**dat_num * det_cov)**-0.5
         # _likelihood = _likelihood * exp(exponent)
         # Log_like = -.5*( dat_num*log(2*pi) + log(abs(det_cov)) ) + exponent
         # _likelihood = exp(Log_like)
         # print(Log_like)
-        return -2*exponent#Log_like
+        return -2*exponent #Log_like
     
     # def Cor_func(self, dt, dx_vec, v_ob_vec): # <SS'>
         
@@ -285,7 +300,7 @@ class stochasticDM():
     
 
 
-    def Cov_matrix(self, mpmath=True):
+    def Cov_matrix(self):
         t_data = self.data.t
         x_data = self.data.x_vec
         v_ob_vec = self.v0_vec  # temporary... should be corrected
@@ -306,7 +321,7 @@ class stochasticDM():
 
         #         cov_mat[i,j] = self.Cor_func(dt, dx_vec, v_ob_vec)
 
-        cov_mat = _Cov_matrix(t_data, x_data, v_ob_vec, m, sig_v, mpmath)
+        cov_mat = _Cov_matrix(t_data, x_data, v_ob_vec, m, sig_v, self.mpmath)
 
         # __cor_func = np.vectorize(self.__temp_cor_func)
         # cov_mat = __cor_func(range(tot_num), range(tot_num))
@@ -335,16 +350,16 @@ def _Cov_matrix(t_data, x_data, v_ob_vec, m, sig_v, mpmath=True):
     t_data_ref = ray.put(t_data)
     x_data_ref = ray.put(x_data)
 
-    result_refs = []
-    for i in range(set_num_max):
-        testmat = _Cov_mat_process.remote(i, t_data_ref, x_data_ref, v_ob_vec, m, sig_v, mpmath)
-        result_refs.append(testmat)
-
     # Cov_mat = np.zeros((tot_num , tot_num))
     if mpmath:
         Cov_mat = mp.matrix(tot_num)
     else:
         Cov_mat = np.zeros((tot_num, tot_num))
+
+    result_refs = []
+    for i in range(set_num_max):
+        testmat = _Cov_mat_process.remote(i, t_data_ref, x_data_ref, v_ob_vec, m, sig_v, mpmath)
+        result_refs.append(testmat)
 
     while result_refs:
         done, result_refs = ray.wait(result_refs)
@@ -443,63 +458,6 @@ def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True): # <SS'>
     return result
 
 
-
-
-
 if __name__=="__main__":
-    
-    mp.mp.dps = 30
-    test_num = 1000
-    dat_num = 300
-    k_num = 100
-    time = ly
-    theta_ = 2*pi*time/ly
-    print(f"theta: ", theta_)
+    pass
 
-    t_data = np.linspace(0,time,dat_num) #+ np.random.normal(0, time/50, dat_num)
-    theta_data = np.linspace(0, theta_, dat_num) #+ np.random.normal(0, theta_/50, dat_num)
-    x_data = (AU/c)*np.array( [[cos(theta), cos(pi/3)*sin(theta), sin(pi/3)*sin(theta)] for theta in theta_data])
-
-    result_list = np.zeros(test_num)
-    result_lensing_list=np.zeros(test_num)
-    data = DMRandomGenerator(t_data, x_data, k_num=k_num, seed=None)
-    test = stochasticDM(data=data)
-    # print(test.cov_mat)
-    # eval, evec = np.linalg.eig(test.cov_mat)
-    # print(eval)
-    # print(len(test.data.ob))
-
-    for i in range(test_num):
-        data = DMRandomGenerator(t_data, x_data, k_num=k_num, NO_LENSING=True, INCLUDE_LENSING=True, seed=None)
-        test.data = data
-
-        result_list[i] = test.Log_likelihood(lensed=False)
-        result_lensing_list[i] = test.Log_likelihood(lensed=True)
-        if i%10==0: print(f"\rtest_num = {i} / {test_num}", end='')
-
-    ######################################
-
-    
-    start = 150
-    end = 450
-
-    fig, ax = plt.subplots()
-
-    ax.hist(result_list, range=[start, end], bins=50, density=True, alpha=.5, label="No lens")
-    ax.hist(result_lensing_list, range=[start, end], bins=50, density=True, alpha=.5, label="Lensed")
-    # plt.hist(temp_list, range=[0,1*dat_num], bins=100, density=True, alpha=.3)
-    
-    x_list = np.linspace(0,2*dat_num, 501)
-    ax.plot(x_list , chi2.pdf(x_list, df=dat_num), linestyle='--', linewidth=1, color='k')
-    ax.set_xlim(start, end)
-    ax.set_xlabel("$\\mathbf{s}\\mathbf{\\Sigma}^{-1}\\mathbf{s}$")
-    ax.set_ylabel("Density")
-    ax.legend()
-    ax.text( ax.get_xlim()[1]*0.05 + ax.get_xlim()[0]*0.95,
-            ax.get_ylim()[1]*0.95,
-            "$m_a = 10^{-13}$eV\n\
-                $N_k=100$\n\
-                $T_{\\rm obs} =$ 1 yr.\n\
-                $\\Delta t = T_{\\rm obs}/300$",
-            verticalalignment='top', horizontalalignment='left')
-    plt.show()
