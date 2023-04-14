@@ -3,7 +3,7 @@ from numpy import sqrt, sin, cos, arcsin, arccos, arctan, abs, inner, cross, log
 from scipy.special import loggamma
 from mpmath import hyp1f1
 import mpmath as mp
-mp.mp.dps=40
+mp.mp.dps=30
 mp.mp.pretty=True
 
 mp2 = mp.mp.clone()
@@ -51,6 +51,7 @@ minute = 60
 Error_here = False
 Error_code = 1234567
 
+##############################################
 
 @ray.remote
 def ray_Amp_Sun(x_idx, v_vecs, r_vecs, m=1e-13*eV/hbar ):
@@ -201,7 +202,7 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
 
 
 class stochasticDM():
-    def __init__(self, data=None, mpmath=True):   # data: DMobData form, seed: integer
+    def __init__(self, data=None, mpmath=True):   # data: DMobData class, mpmath: whether using mpmath package for calc.
         
         self.mpmath = mpmath
         # # Random generator
