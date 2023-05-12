@@ -12,6 +12,7 @@ mp2.dps = 12
 import random
 
 import ray
+from tqdm import tqdm
 from os import cpu_count
 cpu_num = cpu_count()   #number of processor
 # ray.init(num_cpus=12, ignore_reinit_error=True)
@@ -66,7 +67,7 @@ def ray_Amp_Sun(x_idx, v_vecs, r_vecs, m=1e-13*eV/hbar ):
 def Amp_Sun(v_vec, r_vec, m=1e-13*eV/hbar ):    # m, v : natural unit
 
 
-    r_vec = np.array( [0,0,1] ) * AU/c
+    # r_vec = np.array( [0,0,1] ) * AU/c
     r = np.linalg.norm(r_vec)
     v = np.linalg.norm(v_vec)
 
@@ -89,8 +90,9 @@ class DMobData():
         self.x_vec = None
         self.ob = None
         self.ob_num = None
+        self.noise = 0
 
-    def AddData(self, t_data, x_vec_data, ob_data, ob_num, ob_lensed_data=None):
+    def AddData(self, t_data, x_vec_data, ob_data, ob_num=0, noise=0, ob_lensed_data=None):
         data_num = len(t_data)
 
         if self.ob_num is None:
@@ -98,8 +100,11 @@ class DMobData():
             self.x_vec = x_vec_data
             self.ob = ob_data
             self.ob_num = np.repeat(ob_num, data_num)
+            self.noise = noise
             if ob_lensed_data is not None:
                 self.ob_lensed = ob_lensed_data
+            
+            # Not used
         else:
             self.t = np.concatenate((self.t, t_data), axis=0)
             self.x_vec = np.concatenate((self.x_vec, x_vec_data), axis=0)
@@ -107,7 +112,7 @@ class DMobData():
             self.ob_num = np.concatenate((self.ob_num, np.repeat(ob_num, data_num)), axis=0)
             if ob_lensed_data is not None:
                 self.ob_lensed = np.concatenate((self.ob_lensed, ob_lensed_data), axis=0)
-
+            # Add Noise if used..
 
 # class DMobData():
 #     def __init(self):
@@ -129,8 +134,9 @@ class DMobData():
 #             return np.concatenate([self.ob[j] for j in sorted(self.ob)], axis=0)
         
 
-def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0_vec = None
-                      , sig_v = None, m=1e-13*eV/hbar, seed=None, k_num = 1000, ob_num=0):
+def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0_vec = None,
+                      sig_v = None, m=1e-13*eV/hbar, noise=None,
+                      seed = None, k_num = 1000, ob_num=0):  #ob_num: idx of observer
     # t_data: time series numpy ,    x_data: location series 3-vectors numpy array   
     # v0_vec: v0 vector
     if v0_vec is None:
@@ -142,6 +148,11 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
         _sig_v = np.linalg.norm(_v0_vec) / sqrt(2)
     else:
         _sig_v = sig_v
+    # Detector noise
+    if noise is None:
+        _noise = 0
+    else:
+        _noise = noise
 
     # Random generator
     data_len = len(t_data)
@@ -159,7 +170,7 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
     basis_comp_nums = np.exp(1j*ex1) * sqrt(2/k_num)
 
     if NO_LENSING:
-        ob_data_no_lens = np.sum(basis_comp_nums.real, axis=0)
+        ob_data_no_lens = np.sum(basis_comp_nums.real, axis=0) + _rng.normal(0, _noise, data_len)
 
     if INCLUDE_LENSING:
         t_num = len(t_data)
@@ -190,12 +201,12 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
         #
 
         lensed_comp_nums = basis_comp_nums * amps
-        ob_lensed_data = np.sum(lensed_comp_nums.real, axis=0)
+        ob_lensed_data = np.sum(lensed_comp_nums.real, axis=0) + _rng.normal(0, _noise, data_len)
     else:
         ob_lensed_data = None
 
     result = DMobData()
-    result.AddData(t_data=t_data, x_vec_data=x_data, ob_data=ob_data_no_lens, ob_lensed_data = ob_lensed_data, ob_num=ob_num)
+    result.AddData(t_data=t_data, x_vec_data=x_data, ob_data=ob_data_no_lens, ob_lensed_data = ob_lensed_data, ob_num=ob_num, noise=_noise)
 
     return result
 
@@ -307,8 +318,9 @@ class stochasticDM():
         v_ob_vec = self.v0_vec  # temporary... should be corrected
         m = self.m_a
         sig_v = self.sig_v
+        noise = self.data.noise
 
-        # tot_num = len(t_data)
+        tot_num = len(t_data)
         # cov_mat = np.zeros((tot_num, tot_num))
 
         # dt_mat = t_data[:,None] - t_data[None,:]
@@ -323,6 +335,8 @@ class stochasticDM():
         #         cov_mat[i,j] = self.Cor_func(dt, dx_vec, v_ob_vec)
 
         cov_mat = _Cov_matrix(t_data, x_data, v_ob_vec, m, sig_v, self.mpmath)
+        for i in range(tot_num):
+            cov_mat[i,i] = cov_mat[i,i] + noise**2      # diagonal noise^2 matrix added
 
         # __cor_func = np.vectorize(self.__temp_cor_func)
         # cov_mat = __cor_func(range(tot_num), range(tot_num))
