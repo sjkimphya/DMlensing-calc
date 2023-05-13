@@ -1,4 +1,6 @@
 import numpy as np
+np.set_printoptions(linewidth=150)
+
 from numpy import sqrt, sin, cos, arcsin, arccos, arctan, abs, inner, cross, log10, exp, log
 from scipy.special import loggamma
 from mpmath import hyp1f1
@@ -91,8 +93,9 @@ class DMobData():
         self.ob = None
         self.ob_num = None
         self.noise = 0
+        self.m = None
 
-    def AddData(self, t_data, x_vec_data, ob_data, ob_num=0, noise=0, ob_lensed_data=None):
+    def AddData(self, t_data, x_vec_data, ob_data, m=1e-13*eV/hbar, ob_num=0, noise=0, ob_lensed_data=None):
         data_num = len(t_data)
 
         if self.ob_num is None:
@@ -101,18 +104,20 @@ class DMobData():
             self.ob = ob_data
             self.ob_num = np.repeat(ob_num, data_num)
             self.noise = noise
+            self.m = m
             if ob_lensed_data is not None:
                 self.ob_lensed = ob_lensed_data
             
-            # Not used
+        # Not used
         else:
-            self.t = np.concatenate((self.t, t_data), axis=0)
-            self.x_vec = np.concatenate((self.x_vec, x_vec_data), axis=0)
-            self.ob = np.concatenate((self.ob, ob_data), axis=0)
-            self.ob_num = np.concatenate((self.ob_num, np.repeat(ob_num, data_num)), axis=0)
-            if ob_lensed_data is not None:
-                self.ob_lensed = np.concatenate((self.ob_lensed, ob_lensed_data), axis=0)
-            # Add Noise if used..
+            raise Exception("DMobData.AddData: not used part")
+        #     self.t = np.concatenate((self.t, t_data), axis=0)
+        #     self.x_vec = np.concatenate((self.x_vec, x_vec_data), axis=0)
+        #     self.ob = np.concatenate((self.ob, ob_data), axis=0)
+        #     self.ob_num = np.concatenate((self.ob_num, np.repeat(ob_num, data_num)), axis=0)
+        #     if ob_lensed_data is not None:
+        #         self.ob_lensed = np.concatenate((self.ob_lensed, ob_lensed_data), axis=0)
+        #     # Add Noise, m if used..
 
 # class DMobData():
 #     def __init(self):
@@ -206,7 +211,9 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
         ob_lensed_data = None
 
     result = DMobData()
-    result.AddData(t_data=t_data, x_vec_data=x_data, ob_data=ob_data_no_lens, ob_lensed_data = ob_lensed_data, ob_num=ob_num, noise=_noise)
+    result.AddData(t_data=t_data, x_vec_data=x_data, m=m, 
+                   ob_data=ob_data_no_lens, ob_lensed_data = ob_lensed_data, ob_num=ob_num, 
+                   noise=_noise)
 
     return result
 
@@ -224,13 +231,14 @@ class stochasticDM():
         # environment constant
         self.g_eff = 1
         self.rho_a = 1
-        self.m_a = 1e-13 * eV / hbar
+        self.m = 1e-13 * eV / hbar
         self.v0_vec = np.array( [0,0,8e-4] )
         self.sig_v = np.linalg.norm(self.v0_vec) / sqrt(2)
         
 
         if data is not None:
             self.data = data
+            self.m = data.m
 
         # Covariance matrix
         self.cov_mat = self.Cov_matrix()
@@ -316,7 +324,7 @@ class stochasticDM():
         t_data = self.data.t
         x_data = self.data.x_vec
         v_ob_vec = self.v0_vec  # temporary... should be corrected
-        m = self.m_a
+        m = self.m
         sig_v = self.sig_v
         noise = self.data.noise
 
@@ -426,10 +434,10 @@ def Cov_mat_process(set_num, t_data, x_data, v_ob_vec, m, sig_v, mpmath=True):
     return (_i, result)
 
 
-def Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True): # <SS'>
-    return _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath)
+def Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True, envelop=False): # <SS'>
+    return _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath, envelop)
 
-def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True): # <SS'>
+def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True, envelop=False): # <SS'>
         
     # v_ob_vec       (numpy, 3d vector)
     # dx_vec (numpy, 3d vector) ( [dx, dy, dz] )
@@ -469,7 +477,10 @@ def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True): # <SS'>
     if mpmath: comp = mp.exp(ex) * zeta**-1.5
     else:      comp = exp(ex) * zeta**-1.5
     
-    result = Const * comp.real
+    if envelop:
+        result = Const * abs(comp)
+    else:
+        result = Const * comp.real
     return result
 
 
