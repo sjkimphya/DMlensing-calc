@@ -3,6 +3,7 @@ np.set_printoptions(linewidth=150)
 
 from numpy import sqrt, sin, cos, arcsin, arccos, arctan, abs, inner, cross, log10, exp, log
 from scipy.special import loggamma
+from scipy.stats import norm, chi2
 from mpmath import hyp1f1
 import mpmath as mp
 mp.mp.dps=30
@@ -71,7 +72,8 @@ def Amp_Sun(v_vec, r_vec, m=1e-13*eV/hbar ):    # m, v : natural unit
 
     # r_vec = np.array( [0,0,1] ) * AU/c
     r = np.linalg.norm(r_vec)
-    v = np.linalg.norm(v_vec)
+    # v = np.linalg.norm(v_vec) * v_vec / 
+    v = np.dot(v_vec, v_vec)**0.5
 
     M = m
     B = M_sN*M / v
@@ -141,7 +143,8 @@ class DMobData():
 
 def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0_vec = None,
                       sig_v = None, m=1e-13*eV/hbar, noise=None,
-                      seed = None, k_num = 1000, ob_num=0):  #ob_num: idx of observer
+                      seed = None, k_num = 1000,
+                      test_num=1, ob_num=0):  #ob_num: idx of observer
     # t_data: time series numpy ,    x_data: location series 3-vectors numpy array   
     # v0_vec: v0 vector
     if v0_vec is None:
@@ -160,9 +163,12 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
         _noise = noise
 
     # Random generator
-    data_len = len(t_data)
+    t_num = len(t_data)
     _rng = np.random.default_rng(seed)
-    rnd_phase = np.tile(_rng.random(k_num), (data_len, 1)).T * (2*pi)      # random phase \in [0, 2*pi]
+    if test_num==1:
+        rnd_phase = np.tile(_rng.random(k_num), (t_num, 1)).T * (2*pi)      # random phase \in [0, 2*pi]
+    else:
+        rnd_phase = np.repeat(np.random.random((test_num,k_num))[:,:,np.newaxis], t_num, axis=-1) * (2*pi)
 
     # Generate random k
     _temp = {}
@@ -170,25 +176,25 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
         _temp[idx] = _rng.normal(_v0_vec[idx], _sig_v, size=(k_num,1))
     v_vecs = np.concatenate( [_temp[j] for j in sorted(_temp)], axis=1 )
     omegas = sqrt(np.linalg.norm(v_vecs, axis=1)**2 + 1) * m
-    ex1 =  np.tensordot(omegas, t_data, axes=0) - m*np.tensordot(v_vecs, x_data.T, axes=1) + rnd_phase  # (k_num*dat_num) array
+    if test_num==1:
+        ex1 =  np.tensordot(omegas, t_data, axes=0) - m*np.tensordot(v_vecs, x_data.T, axes=1) + rnd_phase  # (k_num*dat_num) array
+    else:
+        ex1 =  np.expand_dims(np.tensordot(omegas, t_data, axes=0) - m*np.tensordot(v_vecs, x_data.T, axes=1), axis=0) + rnd_phase  # (k_num*dat_num) array
 
-    basis_comp_nums = np.exp(1j*ex1) * sqrt(2/k_num)
+    basis_comp_nums = np.exp(1j*ex1) * sqrt(2/k_num)    # [test_num, k_num, t_num]
 
     if NO_LENSING:
-        ob_data_no_lens = np.sum(basis_comp_nums.real, axis=0) + _rng.normal(0, _noise, data_len)
+        if test_num==1:
+            ob_data_no_lens = np.sum(basis_comp_nums.real, axis=-2) + _rng.normal(0, _noise, t_num)
+        else:
+            ob_data_no_lens = np.sum(basis_comp_nums.real, axis=-2) + _rng.normal(0, _noise, (test_num, t_num))
 
-    if INCLUDE_LENSING:
-        t_num = len(t_data)
-        amps = np.zeros((k_num, t_num), dtype=complex)
-
-        # not use ray
-        # for v_idx in range(k_num):
-        #     for x_idx in range(t_num):  
-        #         amps[v_idx, x_idx] = Amp_Sun(v_vecs[v_idx], x_data[x_idx])
-
+    if INCLUDE_LENSING:    
         # use ray
         v_ref = ray.put(v_vecs)
         x_ref = ray.put(x_data)
+
+        amps = np.zeros((k_num, t_num), dtype=complex)
 
         result_refs = []
         for x_idx in range(t_num):
@@ -204,16 +210,34 @@ def DMRandomGenerator(t_data, x_data, NO_LENSING=True, INCLUDE_LENSING=False, v0
             for v_idx in range(k_num):
                 amps[v_idx, x_idx] = amp_result[v_idx]
         #
-
-        lensed_comp_nums = basis_comp_nums * amps
-        ob_lensed_data = np.sum(lensed_comp_nums.real, axis=0) + _rng.normal(0, _noise, data_len)
+        if test_num == 1:
+            lensed_comp_nums = basis_comp_nums * amps
+            ob_lensed_data = np.sum(lensed_comp_nums.real, axis=-2) + _rng.normal(0, _noise, t_num)
+        else:
+            lensed_comp_nums = basis_comp_nums * amps[np.newaxis,:,:]
+            ob_lensed_data = np.sum(lensed_comp_nums.real, axis=-2) + _rng.normal(0, _noise, (test_num, t_num))
+        
     else:
         ob_lensed_data = None
 
-    result = DMobData()
-    result.AddData(t_data=t_data, x_vec_data=x_data, m=m, 
-                   ob_data=ob_data_no_lens, ob_lensed_data = ob_lensed_data, ob_num=ob_num, 
-                   noise=_noise)
+    if test_num==1:
+        result = DMobData()
+        result.AddData(t_data=t_data, x_vec_data=x_data, m=m, 
+                    ob_data=ob_data_no_lens, ob_lensed_data = ob_lensed_data, ob_num=ob_num, 
+                    noise=_noise)
+    else:
+        result = []
+        for i in range(test_num):
+            each_result = DMobData()
+            if INCLUDE_LENSING:
+                each_result.AddData(t_data=t_data, x_vec_data=x_data, m=m, 
+                        ob_data=ob_data_no_lens[i,:], ob_lensed_data = ob_lensed_data[i,:], ob_num=ob_num, 
+                        noise=_noise)
+            else:
+                each_result.AddData(t_data=t_data, x_vec_data=x_data, m=m, 
+                        ob_data=ob_data_no_lens[i,:], ob_lensed_data = None, ob_num=ob_num,
+                        noise=_noise)
+            result.append(each_result)
 
     return result
 
@@ -272,11 +296,20 @@ class stochasticDM():
                 data_mat = np.array(self.data.ob_lensed)
             else:
                 data_mat = np.array(ob_data_vec)     # Make data_vec in a colume vector (matrix)
-
+    ######################3
         inv_mat = self.inv_cov_mat
 
         if self.mpmath: exponent = -0.5 * ( data_mat.T * inv_mat * data_mat)[0]
         else: exponent = -0.5 * ( data_mat.T @ inv_mat @ data_mat)
+    ######################
+        # cov_mat = self.cov_mat
+        # evals, evecs = np.linalg.eig(cov_mat)
+        # sorted_indexes = np.argsort(evals)[::-1]
+        # evals = evals[sorted_indexes]
+        # evecs = np.matrix(evecs[:,sorted_indexes])
+
+        # diag_ob = np.squeeze(np.asarray(evecs.H @ data_mat)) / sqrt(evals)
+        # exponent = -0.5*np.sum(diag_ob**2)
         
         # _likelihood = ((2*pi)**dat_num * det_cov)**-0.5
         # _likelihood = _likelihood * exp(exponent)
@@ -434,10 +467,10 @@ def Cov_mat_process(set_num, t_data, x_data, v_ob_vec, m, sig_v, mpmath=True):
     return (_i, result)
 
 
-def Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True, envelop=False): # <SS'>
-    return _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath, envelop)
+def Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True, complex=False): # <SS'>
+    return _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath, complex)
 
-def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True, envelop=False): # <SS'>
+def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True, complex=False): # <SS'>
         
     # v_ob_vec       (numpy, 3d vector)
     # dx_vec (numpy, 3d vector) ( [dx, dy, dz] )
@@ -477,8 +510,8 @@ def _Cov_mat_component(dt, dx_vec, v_ob_vec, m, sig_v, mpmath=True, envelop=Fals
     if mpmath: comp = mp.exp(ex) * zeta**-1.5
     else:      comp = exp(ex) * zeta**-1.5
     
-    if envelop:
-        result = Const * abs(comp)
+    if complex:
+        result = Const * comp
     else:
         result = Const * comp.real
     return result
